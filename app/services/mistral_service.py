@@ -30,47 +30,59 @@ async def find_best_match(request_description: str, candidates: List[User]) -> T
     
     # If there's only one candidate, return them
     if len(candidates) == 1:
-        return candidates[0], f"{candidates[0].name} is the only candidate available in the database."
+        return candidates[0], f"{candidates[0].name} is the only candidate available in our network."
     
-    # Prepare the prompt for Mistral
-    prompt = f"""
-    I need to find the best person to connect with someone who is looking for: {request_description}
+    # Prepare the system prompt with clear instructions
+    system_prompt = """You are a professional networking assistant that helps match people based on their skills, experience, and background.
     
-    Here are the potential candidates based on their resumes:
-    
-    """
+Your task is to analyze candidate resumes and determine the best match for a specific request.
+
+Important guidelines:
+1. Focus ONLY on the candidate's skills, experience, education, and relevant background
+2. DO NOT mention file names, database information, or any technical details about how the data is stored
+3. DO NOT reveal personal contact information beyond what's explicitly provided
+4. Provide reasoning based ONLY on the candidate's professional qualifications and how they match the request
+5. If no candidate is a good match, clearly state this and explain why based on the skills/experience gap
+6. Be concise and professional in your explanation
+7. NEVER include candidate names in your explanation when no match is found - protect user privacy
+8. When no match is found, refer to candidates generically (e.g., "the candidates" or "the profiles") without identifying individuals
+
+Format your response exactly as follows:
+- If there's a match: "Candidate X is the best match because [professional reasons only]"
+- If no match: "No good match found because [explanation of skills/experience gap without naming any individuals]"
+"""
+
+    # Prepare the user prompt
+    user_prompt = f"""I need to find the best person to connect with someone who is looking for: {request_description}
+
+Here are the potential candidates based on their resumes:
+
+"""
     
     # Add each candidate's resume to the prompt
     for i, candidate in enumerate(candidates):
-        prompt += f"Candidate {i+1}:\n"
-        prompt += f"Name: {candidate.name}\n"
+        user_prompt += f"Candidate {i+1}:\n"
+        user_prompt += f"Name: {candidate.name}\n"
         resume_text = candidate.resume_text or "No resume provided"
         # Limit resume text to avoid token limits
         if len(resume_text) > 1000:
             resume_text = resume_text[:1000] + "..."
-        prompt += f"Resume: {resume_text}\n\n"
+        user_prompt += f"Resume: {resume_text}\n\n"
     
-    prompt += """
-    Based on the request and the candidates' resumes, which candidate would be the best match?
-    Please respond with the candidate number (e.g., "Candidate 1") at the beginning of your response, 
-    followed by a clear and concise explanation of why they are the best match.
-    
-    Format your response like this:
-    "Candidate X is the best match because [explanation]"
-    
-    If none of the candidates are a good match, please explicitly state "No good match found" and explain why.
-    """
+    user_prompt += """Based on the request and the candidates' resumes, which candidate would be the best match?
+If none of the candidates are a good match, please explicitly state "No good match found" and explain why based on the skills/experience gap.
+"""
     
     try:
         # Prepare the request payload for Mistral API
         payload = {
             "model": "mistral-large-latest",  # Using Mistral's large model
             "messages": [
-                {"role": "system", "content": "You are a helpful assistant that matches people based on their skills and experience."},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
             ],
             "max_tokens": 500,
-            "temperature": 0.7
+            "temperature": 0.3  # Lower temperature for more focused responses
         }
         
         headers = {
@@ -108,7 +120,22 @@ async def find_best_match(request_description: str, candidates: List[User]) -> T
             # Check if any of the no-match indicators are in the response (case insensitive)
             if any(indicator.lower() in ai_response.lower() for indicator in no_match_indicators):
                 print("Mistral indicated no good match was found")
-                return None, ai_response
+                
+                # Clean up the explanation to remove any technical details
+                explanation = ai_response
+                
+                # Remove any mentions of database, files, etc.
+                explanation = re.sub(r'(?i)(database|file|stored|record|system)', 'network', explanation)
+                
+                # Remove any candidate names from the explanation to protect privacy
+                for candidate in candidates:
+                    if candidate.name and len(candidate.name) > 2:  # Avoid replacing very short names that might be common words
+                        explanation = re.sub(r'(?i)\b' + re.escape(candidate.name) + r'\b', "a candidate", explanation)
+                
+                # Remove any "Candidate X" references
+                explanation = re.sub(r'Candidate \d+', "a candidate", explanation)
+                
+                return None, explanation
             
             # Parse the response to get the candidate number and explanation
             selected_candidate = None
@@ -130,6 +157,9 @@ async def find_best_match(request_description: str, candidates: List[User]) -> T
                 if match:
                     explanation = f"{selected_candidate.name} is the best match because {match.group(1)}"
                 
+                # Remove any mentions of database, files, etc.
+                explanation = re.sub(r'(?i)(database|file|stored|record|system)', 'network', explanation)
+                
                 return selected_candidate, explanation
             
             # If no specific candidate was found but the response doesn't indicate no match,
@@ -139,14 +169,14 @@ async def find_best_match(request_description: str, candidates: List[User]) -> T
                 # If the response starts with a number, use that as the candidate index
                 candidate_index = int(first_word) - 1
                 candidate = candidates[candidate_index]
-                return candidate, f"{candidate.name} is the best match based on the analysis."
+                return candidate, f"{candidate.name} is the best match based on their professional experience and skills."
             
             # Last resort: return the first candidate with a warning
             print("No specific candidate found in Mistral response, defaulting to first candidate")
-            return candidates[0], f"{candidates[0].name} might be a match based on the available information."
+            return candidates[0], f"{candidates[0].name} might be a match based on their professional background."
     except Exception as e:
         print(f"Error calling Mistral API: {e}")
         # Return the first candidate with an error message
         if candidates:
-            return candidates[0], f"Error processing match, defaulting to {candidates[0].name}. Error: {str(e)}"
-        return None, f"Error processing match and no candidates available. Error: {str(e)}" 
+            return candidates[0], f"Error processing match, defaulting to {candidates[0].name}. Please try again with more specific criteria."
+        return None, f"Error processing match and no candidates available. Please try again later." 

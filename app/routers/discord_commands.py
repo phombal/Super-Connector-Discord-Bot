@@ -82,9 +82,9 @@ async def find_connection(request: ConnectionRequest):
         candidates = await get_all_users()
         
         if not candidates:
-            raise HTTPException(status_code=404, detail="No users found in the database")
+            raise HTTPException(status_code=404, detail="No users found in our network")
         
-        # Find the best match using OpenAI
+        # Find the best match using Mistral
         try:
             best_match, explanation = await find_best_match(request.looking_for, candidates)
         except Exception as e:
@@ -93,15 +93,29 @@ async def find_connection(request: ConnectionRequest):
             if candidates:
                 return MatchResponse(
                     user=candidates[0], 
-                    explanation=f"Error finding best match, defaulting to {candidates[0].name}. Error: {str(e)}"
+                    explanation=f"Error finding best match, defaulting to {candidates[0].name}. Please try again with more specific criteria."
                 )
             else:
-                raise HTTPException(status_code=500, detail=f"Error finding match: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Error finding match. Please try again later.")
         
         if not best_match:
+            # Sanitize the explanation for privacy
+            sanitized_explanation = explanation if explanation else "Your specific requirements couldn't be matched with our current network."
+            
+            # Remove any mentions of database, files, etc.
+            sanitized_explanation = re.sub(r'(?i)(database|file|stored|record|system)', 'network', sanitized_explanation)
+            
+            # Additional privacy protection: Remove any candidate names from the explanation
+            for candidate in candidates:
+                if candidate.name and len(candidate.name) > 2:  # Avoid replacing very short names that might be common words
+                    sanitized_explanation = re.sub(r'(?i)\b' + re.escape(candidate.name) + r'\b', "a candidate", sanitized_explanation)
+            
+            # Remove any "Candidate X" references
+            sanitized_explanation = re.sub(r'Candidate \d+', "a candidate", sanitized_explanation)
+            
             raise HTTPException(
                 status_code=404, 
-                detail=f"No users matching your specific requirements for '{request.looking_for}' were found. {explanation}"
+                detail=f"No users matching your specific requirements for '{request.looking_for}' were found. {sanitized_explanation}"
             )
         
         # Clean up the explanation by replacing "Candidate X" references with the person's name
@@ -114,9 +128,12 @@ async def find_connection(request: ConnectionRequest):
         # Remove any remaining "Candidate X" references (for candidates not in our list)
         clean_explanation = re.sub(r'Candidate \d+', best_match.name, clean_explanation)
         
+        # Remove any mentions of database, files, etc.
+        clean_explanation = re.sub(r'(?i)(database|file|stored|record|system)', 'network', clean_explanation)
+        
         return MatchResponse(user=best_match, explanation=clean_explanation)
     except HTTPException:
         raise
     except Exception as e:
         print(f"Error in find_connection: {e}")
-        raise HTTPException(status_code=500, detail=str(e)) 
+        raise HTTPException(status_code=500, detail="An error occurred while finding a connection. Please try again later.") 

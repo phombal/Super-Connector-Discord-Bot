@@ -63,7 +63,7 @@ def mock_mistral():
             "choices": [
                 {
                     "message": {
-                        "content": "Candidate 1 is the best match because they have experience as a software engineer."
+                        "content": "Candidate 1 is the best match because they have experience as a software engineer with relevant skills in programming and problem-solving."
                     }
                 }
             ]
@@ -112,7 +112,7 @@ async def test_find_connection(mock_find_best_match, mock_get_users, client, moc
     
     # Mock the find_best_match function
     test_user = User(id="test-id-1", name="Test User 1", phone="1234567890", resume_text="software engineer with 5 years experience")
-    explanation = "Test User 1 is the best match because they have experience as a software engineer."
+    explanation = "Test User 1 is the best match because they have experience as a software engineer with relevant skills in programming and problem-solving."
     mock_find_best_match.return_value = (test_user, explanation)
     
     # Make the request
@@ -127,6 +127,7 @@ async def test_find_connection(mock_find_best_match, mock_get_users, client, moc
     assert response.json()["user"]["name"] == "Test User 1"
     assert response.json()["user"]["phone"] == "1234567890"
     assert "Test User 1 is the best match" in response.json()["explanation"]
+    assert "programming and problem-solving" in response.json()["explanation"]
 
 
 @patch("app.routers.discord_commands.get_all_users")
@@ -140,19 +141,19 @@ async def test_find_connection_no_match(mock_find_best_match, mock_get_users, cl
     ]
     
     # Mock the find_best_match function to return None (no match found)
-    explanation = "No good match found because none of the candidates are from Fremont."
+    explanation = "No good match found because none of the candidates have the required skills in data science or machine learning."
     mock_find_best_match.return_value = (None, explanation)
     
     # Make the request
     response = client.post(
         "/api/discord/connect",
-        json={"user_id": "requester-id", "looking_for": "someone from Fremont"}
+        json={"user_id": "requester-id", "looking_for": "data scientist"}
     )
     
     # Check the response
     assert response.status_code == 404
     assert "No users matching your specific requirements" in response.json()["detail"]
-    assert explanation in response.json()["detail"]
+    assert "data science or machine learning" in response.json()["detail"]
 
 
 @patch("app.routers.discord_commands.get_all_users")
@@ -178,4 +179,5 @@ async def test_find_connection_error(mock_find_best_match, mock_get_users, clien
     # Check the response - should return the first candidate with an error message
     assert response.status_code == 200
     assert response.json()["user"]["id"] == "test-id-1"
-    assert "Error finding best match" in response.json()["explanation"] 
+    assert "Error finding best match" in response.json()["explanation"]
+    assert "Please try again with more specific criteria" in response.json()["explanation"] 
