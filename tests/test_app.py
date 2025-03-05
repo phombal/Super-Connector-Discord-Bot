@@ -51,6 +51,28 @@ def mock_openai():
         yield mock
 
 
+@pytest.fixture
+def mock_mistral():
+    """Mock the Mistral API client."""
+    with patch("httpx.AsyncClient.post") as mock_post:
+        # Create a mock response
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": "Candidate 1 is the best match because they have experience as a software engineer."
+                    }
+                }
+            ]
+        }
+        mock_post.return_value = mock_response
+        
+        yield mock_post
+
+
 def test_root(client):
     """Test the root endpoint."""
     response = client.get("/")
@@ -79,7 +101,7 @@ async def test_register_user(mock_create_user, client, mock_supabase):
 
 @patch("app.routers.discord_commands.get_all_users")
 @patch("app.routers.discord_commands.find_best_match")
-async def test_find_connection(mock_find_best_match, mock_get_users, client, mock_supabase, mock_openai):
+async def test_find_connection(mock_find_best_match, mock_get_users, client, mock_supabase, mock_mistral):
     """Test the find_connection endpoint."""
     # Mock the get_users_by_category function
     test_users = [
@@ -109,7 +131,7 @@ async def test_find_connection(mock_find_best_match, mock_get_users, client, moc
 
 @patch("app.routers.discord_commands.get_all_users")
 @patch("app.routers.discord_commands.find_best_match")
-async def test_find_connection_no_match(mock_find_best_match, mock_get_users, client, mock_supabase, mock_openai):
+async def test_find_connection_no_match(mock_find_best_match, mock_get_users, client, mock_supabase, mock_mistral):
     """Test the find_connection endpoint when no match is found."""
     # Mock the get_users_by_category function
     mock_get_users.return_value = [
@@ -135,7 +157,7 @@ async def test_find_connection_no_match(mock_find_best_match, mock_get_users, cl
 
 @patch("app.routers.discord_commands.get_all_users")
 @patch("app.routers.discord_commands.find_best_match")
-async def test_find_connection_error(mock_find_best_match, mock_get_users, client, mock_supabase, mock_openai):
+async def test_find_connection_error(mock_find_best_match, mock_get_users, client, mock_supabase, mock_mistral):
     """Test the find_connection endpoint when an error occurs."""
     # Mock the get_users_by_category function
     test_users = [

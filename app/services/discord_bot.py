@@ -10,7 +10,7 @@ import re
 
 from app.models.user import User
 from app.services.database import create_user, get_user, update_user_resume, get_users_by_category, get_all_users, update_user, delete_user
-from app.services.openai_service import find_best_match
+from app.services.mistral_service import find_best_match
 from app.utils.resume_parser import process_resume
 
 # Load environment variables

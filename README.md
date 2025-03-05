@@ -6,7 +6,7 @@ A Discord bot that serves as a super connector, allowing users to register their
 
 - Users can register their name, phone number, and upload their resume
 - Users can request to be connected with specific types of people
-- Bot uses OpenAI's 4o API to intelligently match users based on resume content
+- Bot uses Mistral AI's API to intelligently match users based on resume content
 - Data is stored securely in Supabase
 
 ## Setup
@@ -16,7 +16,7 @@ A Discord bot that serves as a super connector, allowing users to register their
 - Python 3.8+
 - Discord Developer Account
 - Supabase Account
-- OpenAI API Key
+- Mistral AI API Key
 
 ### Installation
 
@@ -31,7 +31,7 @@ A Discord bot that serves as a super connector, allowing users to register their
    DISCORD_CLIENT_ID=your_discord_client_id
    SUPABASE_URL=your_supabase_url
    SUPABASE_KEY=your_supabase_key
-   OPENAI_API_KEY=your_openai_api_key
+   MISTRAL_API_KEY=your_mistral_api_key
    ```
 
 ### Discord Developer Portal Setup
@@ -80,6 +80,15 @@ Use the `/connect` command to find relevant connections:
 ```
 /connect looking_for:software engineer
 ```
+
+### Updating Information
+Use the `/update` command to update your information:
+```
+/update name:New Name phone:9876543210
+```
+
+### Getting Help
+Use the `/help` command to see all available commands and how to use them.
 
 ## License
 
