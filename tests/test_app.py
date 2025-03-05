@@ -45,7 +45,7 @@ def mock_openai():
     with patch("app.services.openai_service.client") as mock:
         # Mock the chat.completions.create method
         mock_response = MagicMock()
-        mock_response.choices[0].message.content = "Candidate 1 is the best match because..."
+        mock_response.choices[0].message.content = "Candidate 1 is the best match because they have experience as a software engineer."
         mock.chat.completions.create.return_value = mock_response
         
         yield mock
@@ -77,7 +77,7 @@ async def test_register_user(mock_create_user, client, mock_supabase):
     assert response.json()["phone"] == "1234567890"
 
 
-@patch("app.routers.discord_commands.get_users_by_category")
+@patch("app.routers.discord_commands.get_all_users")
 @patch("app.routers.discord_commands.find_best_match")
 async def test_find_connection(mock_find_best_match, mock_get_users, client, mock_supabase, mock_openai):
     """Test the find_connection endpoint."""
@@ -88,7 +88,9 @@ async def test_find_connection(mock_find_best_match, mock_get_users, client, moc
     ]
     
     # Mock the find_best_match function
-    mock_find_best_match.return_value = User(id="test-id-1", name="Test User 1", phone="1234567890", resume_text="software engineer with 5 years experience")
+    test_user = User(id="test-id-1", name="Test User 1", phone="1234567890", resume_text="software engineer with 5 years experience")
+    explanation = "Candidate 1 is the best match because they have experience as a software engineer."
+    mock_find_best_match.return_value = (test_user, explanation)
     
     # Make the request
     response = client.post(
@@ -98,6 +100,59 @@ async def test_find_connection(mock_find_best_match, mock_get_users, client, moc
     
     # Check the response
     assert response.status_code == 200
-    assert response.json()["id"] == "test-id-1"
-    assert response.json()["name"] == "Test User 1"
-    assert response.json()["phone"] == "1234567890" 
+    assert response.json()["user"]["id"] == "test-id-1"
+    assert response.json()["user"]["name"] == "Test User 1"
+    assert response.json()["user"]["phone"] == "1234567890"
+    assert response.json()["explanation"] == explanation
+
+
+@patch("app.routers.discord_commands.get_all_users")
+@patch("app.routers.discord_commands.find_best_match")
+async def test_find_connection_no_match(mock_find_best_match, mock_get_users, client, mock_supabase, mock_openai):
+    """Test the find_connection endpoint when no match is found."""
+    # Mock the get_users_by_category function
+    mock_get_users.return_value = [
+        User(id="test-id-1", name="Test User 1", phone="1234567890", resume_text="software engineer with 5 years experience"),
+        User(id="test-id-2", name="Test User 2", phone="0987654321", resume_text="marketing expert with 10 years experience")
+    ]
+    
+    # Mock the find_best_match function to return None (no match found)
+    explanation = "No good match found because none of the candidates are from Fremont."
+    mock_find_best_match.return_value = (None, explanation)
+    
+    # Make the request
+    response = client.post(
+        "/api/discord/connect",
+        json={"user_id": "requester-id", "looking_for": "someone from Fremont"}
+    )
+    
+    # Check the response
+    assert response.status_code == 404
+    assert "No users matching your specific requirements" in response.json()["detail"]
+    assert explanation in response.json()["detail"]
+
+
+@patch("app.routers.discord_commands.get_all_users")
+@patch("app.routers.discord_commands.find_best_match")
+async def test_find_connection_error(mock_find_best_match, mock_get_users, client, mock_supabase, mock_openai):
+    """Test the find_connection endpoint when an error occurs."""
+    # Mock the get_users_by_category function
+    test_users = [
+        User(id="test-id-1", name="Test User 1", phone="1234567890", resume_text="software engineer with 5 years experience"),
+        User(id="test-id-2", name="Test User 2", phone="0987654321", resume_text="marketing expert with 10 years experience")
+    ]
+    mock_get_users.return_value = test_users
+    
+    # Mock the find_best_match function to raise an exception
+    mock_find_best_match.side_effect = Exception("Test error")
+    
+    # Make the request
+    response = client.post(
+        "/api/discord/connect",
+        json={"user_id": "requester-id", "looking_for": "software engineer"}
+    )
+    
+    # Check the response - should return the first candidate with an error message
+    assert response.status_code == 200
+    assert response.json()["user"]["id"] == "test-id-1"
+    assert "Error finding best match" in response.json()["explanation"] 

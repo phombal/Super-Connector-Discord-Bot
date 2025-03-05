@@ -105,8 +105,8 @@ async def get_users_by_category(category: str):
     
     users = []
     for user_data in response.data:
-        resume_text = user_data.get("resume_text", "")
-        if resume_text and category.lower() in resume_text.lower():
+        # Include all users who have a resume_text
+        if user_data.get("resume_text"):
             users.append(User(
                 id=user_data.get("id"),
                 name=user_data.get("name"),
@@ -114,5 +114,27 @@ async def get_users_by_category(category: str):
                 resume_url=user_data.get("resume_url"),
                 resume_text=user_data.get("resume_text")
             ))
+    
+    return users
+
+
+async def get_all_users():
+    """
+    Get all users from the database.
+    
+    Returns:
+        List of User objects
+    """
+    response = supabase.table("users").select("*").execute()
+    
+    users = []
+    for user_data in response.data:
+        users.append(User(
+            id=user_data.get("id"),
+            name=user_data.get("name"),
+            phone=user_data.get("phone"),
+            resume_url=user_data.get("resume_url"),
+            resume_text=user_data.get("resume_text")
+        ))
     
     return users 

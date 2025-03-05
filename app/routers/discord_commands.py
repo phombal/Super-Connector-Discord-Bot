@@ -2,9 +2,10 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, File, Up
 from typing import Optional
 import os
 import tempfile
+from pydantic import BaseModel
 
 from app.models.user import User, ConnectionRequest
-from app.services.database import create_user, get_user, update_user_resume, get_users_by_category
+from app.services.database import create_user, get_user, update_user_resume, get_users_by_category, get_all_users
 from app.services.openai_service import find_best_match
 from app.utils.resume_parser import process_resume
 
@@ -13,6 +14,12 @@ router = APIRouter(
     tags=["discord"],
     responses={404: {"description": "Not found"}},
 )
+
+
+class MatchResponse(BaseModel):
+    """Response model for connection matches."""
+    user: User
+    explanation: str
 
 
 @router.post("/register")
@@ -58,7 +65,7 @@ async def register_user(name: str = Form(...), phone: str = Form(...), resume: O
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/connect")
+@router.post("/connect", response_model=MatchResponse)
 async def find_connection(request: ConnectionRequest):
     """
     Find a connection for a user.
@@ -67,23 +74,38 @@ async def find_connection(request: ConnectionRequest):
         request: ConnectionRequest object containing the user's request
         
     Returns:
-        Best matching User object
+        MatchResponse object containing the best matching User and explanation
     """
     try:
-        # Get users that match the category
-        candidates = await get_users_by_category(request.looking_for)
+        # Get all users
+        candidates = await get_all_users()
         
         if not candidates:
-            raise HTTPException(status_code=404, detail=f"No users found matching '{request.looking_for}'")
+            raise HTTPException(status_code=404, detail="No users found in the database")
         
         # Find the best match using OpenAI
-        best_match = await find_best_match(request.looking_for, candidates)
+        try:
+            best_match, explanation = await find_best_match(request.looking_for, candidates)
+        except Exception as e:
+            print(f"Error in find_best_match: {e}")
+            # If there's an error, return the first candidate with an error message
+            if candidates:
+                return MatchResponse(
+                    user=candidates[0], 
+                    explanation=f"Error finding best match, defaulting to first candidate. Error: {str(e)}"
+                )
+            else:
+                raise HTTPException(status_code=500, detail=f"Error finding match: {str(e)}")
         
         if not best_match:
-            raise HTTPException(status_code=404, detail=f"No good match found for '{request.looking_for}'")
+            raise HTTPException(
+                status_code=404, 
+                detail=f"No users matching your specific requirements for '{request.looking_for}' were found. {explanation}"
+            )
         
-        return best_match
+        return MatchResponse(user=best_match, explanation=explanation)
     except HTTPException:
         raise
     except Exception as e:
+        print(f"Error in find_connection: {e}")
         raise HTTPException(status_code=500, detail=str(e)) 

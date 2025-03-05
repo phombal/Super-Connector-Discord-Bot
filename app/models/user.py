@@ -24,10 +24,16 @@ class User(BaseModel):
         
         return phone
 
+    class Config:
+        orm_mode = True
+
 
 class ConnectionRequest(BaseModel):
     """Model for connection requests."""
     
     user_id: str
     looking_for: str
-    additional_info: Optional[str] = None 
+    additional_info: Optional[str] = None
+    
+    class Config:
+        orm_mode = True 

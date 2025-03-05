@@ -8,7 +8,7 @@ import tempfile
 from typing import Optional
 
 from app.models.user import User
-from app.services.database import create_user, get_user, update_user_resume, get_users_by_category
+from app.services.database import create_user, get_user, update_user_resume, get_users_by_category, get_all_users
 from app.services.openai_service import find_best_match
 from app.utils.resume_parser import process_resume
 
@@ -82,28 +82,35 @@ async def on_message(message: discord.Message):
         if message.attachments:
             attachment = message.attachments[0]
             
-            # Download the attachment
-            with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-                await attachment.save(temp_file.name)
-                
-                # Process the resume
-                file_url = attachment.url
-                
-                # Extract text from the resume
-                file_url, resume_text = await process_resume(temp_file.name)
-                
-                # Update the user's resume
-                user_id = waiting_for_resume[message.author.id]
-                await update_user_resume(user_id, file_url, resume_text)
-                
-                # Remove the user from the waiting list
-                del waiting_for_resume[message.author.id]
-                
-                # Send a confirmation message
-                await message.reply("Thanks for uploading your resume! Your information has been saved.")
-                
-                # Clean up the temporary file
-                os.unlink(temp_file.name)
+            try:
+                # Download the attachment to a temporary file
+                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(attachment.filename)[1]) as temp_file:
+                    await attachment.save(temp_file.name)
+                    
+                    # Process the resume
+                    file_url = attachment.url
+                    
+                    # Extract text from the resume
+                    _, resume_text = await process_resume(temp_file.name)
+                    
+                    # Debug output
+                    print(f"Resume text extracted: {resume_text[:100]}...")
+                    
+                    # Update the user's resume
+                    user_id = waiting_for_resume[message.author.id]
+                    await update_user_resume(user_id, file_url, resume_text)
+                    
+                    # Remove the user from the waiting list
+                    del waiting_for_resume[message.author.id]
+                    
+                    # Send a confirmation message
+                    await message.reply("Thanks for uploading your resume! Your information has been saved.")
+                    
+                    # Clean up the temporary file
+                    os.unlink(temp_file.name)
+            except Exception as e:
+                await message.reply(f"Error processing your resume: {str(e)}")
+                print(f"Error processing resume: {e}")
         else:
             await message.reply("Please upload your resume as an attachment.")
     
@@ -118,33 +125,73 @@ async def on_message(message: discord.Message):
 async def connect(interaction: discord.Interaction, looking_for: str):
     """Command to find a connection."""
     try:
-        # Get users that match the category
-        candidates = await get_users_by_category(looking_for)
+        # Get all users from the database
+        candidates = await get_all_users()
         
         if not candidates:
             await interaction.response.send_message(
-                f"Sorry, I couldn't find anyone matching '{looking_for}' in our database.",
+                f"Sorry, there are no users in our database yet.",
                 ephemeral=True
             )
             return
         
         # Find the best match using OpenAI
-        best_match = await find_best_match(looking_for, candidates)
+        try:
+            best_match, explanation = await find_best_match(looking_for, candidates)
+        except Exception as e:
+            print(f"Error in find_best_match: {e}")
+            await interaction.response.send_message(
+                f"Sorry, I encountered an error while finding a match: {str(e)}",
+                ephemeral=True
+            )
+            return
         
         if best_match:
-            await interaction.response.send_message(
-                f"I found a great match for you!\n\n"
-                f"Name: {best_match.name}\n"
-                f"Phone: {best_match.phone}\n\n"
-                f"Feel free to reach out to them directly!",
-                ephemeral=True
-            )
+            try:
+                # Extract a cleaner explanation by removing the candidate number prefix if present
+                clean_explanation = explanation if explanation else "This person's skills and experience match your requirements."
+                
+                # Limit the explanation length to avoid Discord message limits
+                if len(clean_explanation) > 1500:
+                    clean_explanation = clean_explanation[:1500] + "..."
+                
+                await interaction.response.send_message(
+                    f"I found a great match for you!\n\n"
+                    f"Name: {best_match.name}\n"
+                    f"Phone: {best_match.phone}\n\n"
+                    f"Why this person is a good match: {clean_explanation}\n\n"
+                    f"Feel free to reach out to them directly!",
+                    ephemeral=True
+                )
+            except Exception as e:
+                print(f"Error sending match response: {e}")
+                await interaction.response.send_message(
+                    f"I found a match ({best_match.name}), but encountered an error displaying the details: {str(e)}",
+                    ephemeral=True
+                )
         else:
-            await interaction.response.send_message(
-                f"Sorry, I couldn't find a good match for '{looking_for}' in our database.",
-                ephemeral=True
-            )
+            try:
+                # Use the explanation from OpenAI if available, otherwise use a default message
+                no_match_reason = explanation if explanation else "Your specific requirements couldn't be matched with our current database."
+                
+                # Limit the explanation length to avoid Discord message limits
+                if len(no_match_reason) > 1500:
+                    no_match_reason = no_match_reason[:1500] + "..."
+                
+                await interaction.response.send_message(
+                    f"Sorry, I couldn't find anyone matching your specific requirements for '{looking_for}'.\n\n"
+                    f"Reason: {no_match_reason}\n\n"
+                    f"Please try again with different criteria or check back later when more people have registered.",
+                    ephemeral=True
+                )
+            except Exception as e:
+                print(f"Error sending no match response: {e}")
+                await interaction.response.send_message(
+                    f"Sorry, I couldn't find a match and encountered an error: {str(e)}",
+                    ephemeral=True
+                )
     except Exception as e:
+        print(f"Error in connect command: {e}")
         await interaction.response.send_message(
             f"Error finding a connection: {str(e)}",
             ephemeral=True
