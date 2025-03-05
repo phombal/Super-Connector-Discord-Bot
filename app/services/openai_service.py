@@ -27,7 +27,7 @@ async def find_best_match(request_description: str, candidates: List[User]) -> T
     
     # If there's only one candidate, return them
     if len(candidates) == 1:
-        return candidates[0], "This is the only candidate available in the database."
+        return candidates[0], f"{candidates[0].name} is the only candidate available in the database."
     
     # Prepare the prompt for OpenAI
     prompt = f"""
@@ -51,6 +51,9 @@ async def find_best_match(request_description: str, candidates: List[User]) -> T
     Based on the request and the candidates' resumes, which candidate would be the best match?
     Please respond with the candidate number (e.g., "Candidate 1") at the beginning of your response, 
     followed by a clear and concise explanation of why they are the best match.
+    
+    Format your response like this:
+    "Candidate X is the best match because [explanation]"
     
     If none of the candidates are a good match, please explicitly state "No good match found" and explain why.
     """
@@ -97,15 +100,16 @@ async def find_best_match(request_description: str, candidates: List[User]) -> T
         
         # If we found a candidate, return them with the explanation
         if selected_candidate:
-            # Clean up the explanation by removing candidate number references
-            clean_explanation = ai_response
-            for i in range(len(candidates)):
-                candidate_prefix = f"Candidate {i+1}"
-                if candidate_prefix in clean_explanation:
-                    # We'll keep the original explanation to avoid issues
-                    pass
+            # Clean up the explanation to focus on the reasoning
+            explanation = ai_response
             
-            return selected_candidate, clean_explanation
+            # Try to extract just the explanation part if it follows a standard format
+            import re
+            match = re.search(r'Candidate \d+ is the best match because (.*)', explanation, re.IGNORECASE)
+            if match:
+                explanation = f"{selected_candidate.name} is the best match because {match.group(1)}"
+            
+            return selected_candidate, explanation
         
         # If no specific candidate was found but the response doesn't indicate no match,
         # try to find the best candidate based on the first few words
@@ -113,14 +117,15 @@ async def find_best_match(request_description: str, candidates: List[User]) -> T
         if first_word.isdigit() and 1 <= int(first_word) <= len(candidates):
             # If the response starts with a number, use that as the candidate index
             candidate_index = int(first_word) - 1
-            return candidates[candidate_index], ai_response
+            candidate = candidates[candidate_index]
+            return candidate, f"{candidate.name} is the best match based on the analysis."
         
         # Last resort: return the first candidate with a warning
         print("No specific candidate found in OpenAI response, defaulting to first candidate")
-        return candidates[0], f"Based on the available information, this person might be a match. Original AI response: {ai_response}"
+        return candidates[0], f"{candidates[0].name} might be a match based on the available information."
     except Exception as e:
         print(f"Error calling OpenAI API: {e}")
         # Return the first candidate with an error message
         if candidates:
-            return candidates[0], f"Error processing match, defaulting to first available candidate. Error: {str(e)}"
+            return candidates[0], f"Error processing match, defaulting to {candidates[0].name}. Error: {str(e)}"
         return None, f"Error processing match and no candidates available. Error: {str(e)}" 

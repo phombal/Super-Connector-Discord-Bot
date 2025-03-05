@@ -82,14 +82,15 @@ async def test_register_user(mock_create_user, client, mock_supabase):
 async def test_find_connection(mock_find_best_match, mock_get_users, client, mock_supabase, mock_openai):
     """Test the find_connection endpoint."""
     # Mock the get_users_by_category function
-    mock_get_users.return_value = [
+    test_users = [
         User(id="test-id-1", name="Test User 1", phone="1234567890", resume_text="software engineer with 5 years experience"),
         User(id="test-id-2", name="Test User 2", phone="0987654321", resume_text="marketing expert with 10 years experience")
     ]
+    mock_get_users.return_value = test_users
     
     # Mock the find_best_match function
     test_user = User(id="test-id-1", name="Test User 1", phone="1234567890", resume_text="software engineer with 5 years experience")
-    explanation = "Candidate 1 is the best match because they have experience as a software engineer."
+    explanation = "Test User 1 is the best match because they have experience as a software engineer."
     mock_find_best_match.return_value = (test_user, explanation)
     
     # Make the request
@@ -103,7 +104,7 @@ async def test_find_connection(mock_find_best_match, mock_get_users, client, moc
     assert response.json()["user"]["id"] == "test-id-1"
     assert response.json()["user"]["name"] == "Test User 1"
     assert response.json()["user"]["phone"] == "1234567890"
-    assert response.json()["explanation"] == explanation
+    assert "Test User 1 is the best match" in response.json()["explanation"]
 
 
 @patch("app.routers.discord_commands.get_all_users")

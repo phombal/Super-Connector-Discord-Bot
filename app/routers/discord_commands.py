@@ -3,6 +3,7 @@ from typing import Optional
 import os
 import tempfile
 from pydantic import BaseModel
+import re
 
 from app.models.user import User, ConnectionRequest
 from app.services.database import create_user, get_user, update_user_resume, get_users_by_category, get_all_users
@@ -92,7 +93,7 @@ async def find_connection(request: ConnectionRequest):
             if candidates:
                 return MatchResponse(
                     user=candidates[0], 
-                    explanation=f"Error finding best match, defaulting to first candidate. Error: {str(e)}"
+                    explanation=f"Error finding best match, defaulting to {candidates[0].name}. Error: {str(e)}"
                 )
             else:
                 raise HTTPException(status_code=500, detail=f"Error finding match: {str(e)}")
@@ -103,7 +104,17 @@ async def find_connection(request: ConnectionRequest):
                 detail=f"No users matching your specific requirements for '{request.looking_for}' were found. {explanation}"
             )
         
-        return MatchResponse(user=best_match, explanation=explanation)
+        # Clean up the explanation by replacing "Candidate X" references with the person's name
+        clean_explanation = explanation
+        for i, candidate in enumerate(candidates):
+            candidate_ref = f"Candidate {i+1}"
+            if candidate_ref in clean_explanation:
+                clean_explanation = clean_explanation.replace(candidate_ref, candidate.name)
+        
+        # Remove any remaining "Candidate X" references (for candidates not in our list)
+        clean_explanation = re.sub(r'Candidate \d+', best_match.name, clean_explanation)
+        
+        return MatchResponse(user=best_match, explanation=clean_explanation)
     except HTTPException:
         raise
     except Exception as e:
