@@ -11,6 +11,8 @@ class User(BaseModel):
     phone: str
     resume_url: Optional[str] = None
     resume_text: Optional[str] = None
+    has_resume: bool = False
+    connection_requests: list = None
     
     @validator('phone')
     def validate_phone(cls, v):

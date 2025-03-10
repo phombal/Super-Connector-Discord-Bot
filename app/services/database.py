@@ -12,51 +12,89 @@ supabase_key = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(supabase_url, supabase_key)
 
 
-async def create_user(user: User) -> User:
+async def create_user(user: User, discord_id: str = None) -> User:
     """
     Create a new user in the database.
     
     Args:
         user: User object containing user information
+        discord_id: Discord user ID (optional)
         
     Returns:
         User object with ID
     """
-    response = supabase.table("users").insert({
-        "name": user.name,
-        "phone": user.phone,
-        "resume_url": user.resume_url,
-        "resume_text": user.resume_text
-    }).execute()
-    
-    data = response.data[0]
-    user.id = data.get("id")
-    return user
+    try:
+        # Create the user data dictionary
+        user_data = {
+            "name": user.name,
+            "phone": user.phone,
+            "resume_url": user.resume_url,
+            "resume_text": user.resume_text,
+            "has_resume": user.has_resume,
+            "connection_requests": user.connection_requests or []
+        }
+        
+        # Add Discord ID if provided
+        if discord_id:
+            user_data["discord_id"] = discord_id
+        
+        # Insert the user
+        response = supabase.table("users").insert(user_data).execute()
+        
+        if not response.data:
+            print("No data returned from user creation")
+            return None
+        
+        data = response.data[0]
+        user.id = data.get("id")
+        return user
+    except Exception as e:
+        print(f"Error creating user: {e}")
+        return None
 
 
 async def get_user(user_id: str) -> User:
     """
-    Get a user by ID.
+    Get a user by ID or Discord ID.
     
     Args:
-        user_id: User ID
+        user_id: User ID or Discord ID
         
     Returns:
-        User object
+        User object or None if not found
     """
-    response = supabase.table("users").select("*").eq("id", user_id).execute()
-    
-    if not response.data:
+    try:
+        # Check if this looks like a Discord ID (numeric string)
+        is_discord_id = user_id.isdigit()
+        
+        if is_discord_id:
+            print(f"Looking up user by Discord ID: {user_id}")
+            # Query by discord_id field
+            response = supabase.table("users").select("*").eq("discord_id", user_id).execute()
+        else:
+            print(f"Looking up user by database ID: {user_id}")
+            # Query by id field (UUID)
+            response = supabase.table("users").select("*").eq("id", user_id).execute()
+        
+        # Check if we found a user
+        if not response.data:
+            print(f"No user found for ID: {user_id}")
+            return None
+        
+        # Create and return the user object
+        user_data = response.data[0]
+        return User(
+            id=user_data.get("id"),
+            name=user_data.get("name"),
+            phone=user_data.get("phone"),
+            resume_url=user_data.get("resume_url"),
+            resume_text=user_data.get("resume_text"),
+            has_resume=user_data.get("has_resume", False),
+            connection_requests=user_data.get("connection_requests", [])
+        )
+    except Exception as e:
+        print(f"Error getting user: {e}")
         return None
-    
-    user_data = response.data[0]
-    return User(
-        id=user_data.get("id"),
-        name=user_data.get("name"),
-        phone=user_data.get("phone"),
-        resume_url=user_data.get("resume_url"),
-        resume_text=user_data.get("resume_text")
-    )
 
 
 async def update_user_resume(user_id: str, resume_url: str, resume_text: str) -> User:
@@ -64,29 +102,44 @@ async def update_user_resume(user_id: str, resume_url: str, resume_text: str) ->
     Update a user's resume.
     
     Args:
-        user_id: User ID
+        user_id: User ID or Discord ID
         resume_url: URL to the resume file
         resume_text: Extracted text from the resume
         
     Returns:
         Updated User object
     """
-    response = supabase.table("users").update({
-        "resume_url": resume_url,
-        "resume_text": resume_text
-    }).eq("id", user_id).execute()
-    
-    if not response.data:
+    try:
+        # First get the user to ensure we have the correct database ID
+        user = await get_user(user_id)
+        if not user:
+            print(f"No user found for ID: {user_id}")
+            return None
+        
+        # Now update the user with the correct database ID
+        response = supabase.table("users").update({
+            "resume_url": resume_url,
+            "resume_text": resume_text,
+            "has_resume": True
+        }).eq("id", user.id).execute()
+        
+        if not response.data:
+            print(f"No data returned from resume update for user: {user_id}")
+            return None
+        
+        user_data = response.data[0]
+        return User(
+            id=user_data.get("id"),
+            name=user_data.get("name"),
+            phone=user_data.get("phone"),
+            resume_url=user_data.get("resume_url"),
+            resume_text=user_data.get("resume_text"),
+            has_resume=user_data.get("has_resume", False),
+            connection_requests=user_data.get("connection_requests", [])
+        )
+    except Exception as e:
+        print(f"Error updating user resume: {e}")
         return None
-    
-    user_data = response.data[0]
-    return User(
-        id=user_data.get("id"),
-        name=user_data.get("name"),
-        phone=user_data.get("phone"),
-        resume_url=user_data.get("resume_url"),
-        resume_text=user_data.get("resume_text")
-    )
 
 
 async def update_user(user: User) -> User:
@@ -113,6 +166,12 @@ async def update_user(user: User) -> User:
     
     if user.resume_text is not None:
         update_data["resume_text"] = user.resume_text
+        
+    if user.has_resume is not None:
+        update_data["has_resume"] = user.has_resume
+        
+    if user.connection_requests is not None:
+        update_data["connection_requests"] = user.connection_requests
     
     # If there's nothing to update, return the user as is
     if not update_data:
@@ -129,7 +188,9 @@ async def update_user(user: User) -> User:
         name=user_data.get("name"),
         phone=user_data.get("phone"),
         resume_url=user_data.get("resume_url"),
-        resume_text=user_data.get("resume_text")
+        resume_text=user_data.get("resume_text"),
+        has_resume=user_data.get("has_resume", False),
+        connection_requests=user_data.get("connection_requests", [])
     )
 
 
@@ -199,4 +260,34 @@ async def delete_user(user_id: str) -> bool:
         return len(response.data) > 0
     except Exception as e:
         print(f"Error deleting user: {e}")
+        return False
+
+
+async def add_connection_request(user_id: str, requester_id: str) -> bool:
+    """
+    Add a connection request to a user's record.
+    
+    Args:
+        user_id: ID of the user who was requested (database ID)
+        requester_id: ID of the user who made the request (Discord ID)
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        # Get the user's current connection requests
+        user = await get_user(user_id)
+        if not user:
+            print(f"No user found for ID: {user_id}")
+            return False
+            
+        # Add the requester to the list if not already there
+        if requester_id not in user.connection_requests:
+            user.connection_requests.append(requester_id)
+            
+        # Update the user
+        updated_user = await update_user(user)
+        return updated_user is not None
+    except Exception as e:
+        print(f"Error adding connection request: {e}")
         return False 
