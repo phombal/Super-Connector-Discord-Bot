@@ -7,14 +7,14 @@ from dotenv import load_dotenv
 import tempfile
 from typing import Optional, Dict, List, Tuple
 import re
-import httpx
 import json
 import time
 from collections import defaultdict, deque
+from openai import OpenAI
 
 from app.models.user import User
 from app.services.database import create_user, get_user, update_user_resume, get_users_by_category, get_all_users, update_user, delete_user, add_connection_request
-from app.services.mistral_service import find_best_match
+from app.services.openai_service import find_best_match
 from app.utils.resume_parser import process_resume
 
 # Load environment variables
@@ -24,9 +24,8 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = os.getenv("DISCORD_GUILD_ID")
 
-# Mistral API configuration for direct chat
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
-MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
+# OpenAI API configuration
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # Initialize Discord bot
 intents = discord.Intents.default()
@@ -37,6 +36,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Dictionary to track users who are in the process of uploading a resume
 waiting_for_resume = {}
+# Dictionary to track which channel to use for resume uploads (DM or original channel)
+resume_upload_channels = {}
 
 # Message history tracking (channel_id -> list of (timestamp, author, content) tuples)
 # Using deque with maxlen to automatically limit history size
@@ -64,15 +65,13 @@ async def on_ready():
 async def register(interaction: discord.Interaction, name: str, phone: str):
     """Command to register a user."""
     try:
-        # Immediately acknowledge the interaction with a temporary response
-        await interaction.response.send_message(
-            "Processing your registration...",
-            ephemeral=True
-        )
-        print(f"Initial acknowledgment sent for registration request from {name}")
+        # Immediately acknowledge the interaction with a deferred response
+        # This prevents the "application did not respond" error
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        print(f"Deferred response for registration request from {name}")
         
-        # Create a background task to process the request
-        asyncio.create_task(process_registration_request(interaction, name, phone))
+        # Process the request directly (no need for background task with defer)
+        await process_registration_request(interaction, name, phone)
         
     except Exception as e:
         print(f"Error in register command initial response: {e}")
@@ -82,14 +81,20 @@ async def register(interaction: discord.Interaction, name: str, phone: str):
                     "Sorry, I encountered an error processing your registration. Please try again later.",
                     ephemeral=True
                 )
+            else:
+                await interaction.followup.send(
+                    "Sorry, I encountered an error processing your registration. Please try again later.",
+                    ephemeral=True
+                )
         except Exception as follow_up_error:
             print(f"Error sending initial error message: {follow_up_error}")
+            await send_dm_fallback(interaction.user, "Sorry, I encountered an error processing your registration. Please try again later.")
 
 
 async def process_registration_request(interaction: discord.Interaction, name: str, phone: str):
     """Process a registration request asynchronously."""
     try:
-        print(f"Processing registration in background for {name}")
+        print(f"Processing registration for {name}")
         
         # Get the user's Discord ID
         discord_id = str(interaction.user.id)
@@ -128,12 +133,14 @@ async def process_registration_request(interaction: discord.Interaction, name: s
         print(f"Sending registration confirmation for {name}")
         try:
             await interaction.followup.send(
-                f"Thanks for registering, {name}! Please upload your resume as an attachment in your next message.",
+                f"Thanks for registering, {name}! Please check your DMs to upload your resume privately.",
                 ephemeral=True
             )
+            # Send a DM to the user requesting the resume
+            await request_resume_via_dm(interaction.user, "Thanks for registering! Please upload your resume as an attachment in this private message.")
         except Exception as e:
             print(f"Error sending registration confirmation via followup: {e}")
-            await send_dm_fallback(interaction.user, f"Thanks for registering, {name}! Please upload your resume as an attachment in your next message.")
+            await send_dm_fallback(interaction.user, f"Thanks for registering, {name}! Please upload your resume as an attachment in this private message.")
             
     except Exception as e:
         print(f"Unhandled error in process_registration_request: {e}")
@@ -145,6 +152,19 @@ async def process_registration_request(interaction: discord.Interaction, name: s
         except Exception as follow_up_error:
             print(f"Error sending final error message: {follow_up_error}")
             await send_dm_fallback(interaction.user, "An unexpected error occurred while registering. Please try again later.")
+
+
+async def request_resume_via_dm(user, message):
+    """Send a DM to the user requesting their resume."""
+    try:
+        # Create a DM channel with the user
+        dm_channel = await user.create_dm()
+        
+        # Send the message
+        await dm_channel.send(message)
+        print(f"Sent resume request DM to user {user.id}")
+    except Exception as e:
+        print(f"Failed to send resume request DM to user {user.id}: {e}")
 
 
 @bot.event
@@ -169,12 +189,27 @@ async def on_message(message: discord.Message):
         print("Ignoring message from self")
         return
     
+    # Check if this is a DM channel
+    is_dm = isinstance(message.channel, discord.DMChannel)
+    print(f"Message is in DM: {is_dm}")
+    
     # Check if the user is waiting to upload a resume
     if message.author.id in waiting_for_resume:
         print(f"User {message.author.id} is waiting for resume upload")
         
-        # Check if the message has attachments
-        if message.attachments:
+        # For resume uploads, we only process them in DMs for privacy
+        if not is_dm and message.attachments:
+            # If they try to upload in a public channel, redirect them to DMs
+            try:
+                await message.reply("For privacy reasons, please upload your resume in a direct message with me instead of in this channel. I've sent you a DM.", delete_after=10)
+                await message.delete()  # Delete the message with the attachment for privacy
+                await request_resume_via_dm(message.author, "Please upload your resume as an attachment in this private message for privacy.")
+            except Exception as e:
+                print(f"Error redirecting resume upload to DM: {e}")
+            return
+        
+        # Process resume uploads in DMs
+        if is_dm and message.attachments:
             attachment = message.attachments[0]
             temp_file_path = None
             
@@ -229,27 +264,14 @@ async def on_message(message: discord.Message):
                 
                 # Send a confirmation message
                 print(f"Resume successfully processed for user {message.author.id}")
-                try:
-                    await message.reply("Thanks for uploading your resume! Your information has been saved. You can now use the `/connect` command to find connections.")
-                except discord.errors.HTTPException as e:
-                    print(f"HTTP Exception when replying to message: {e}")
-                    try:
-                        await message.channel.send(f"{message.author.mention} Thanks for uploading your resume! Your information has been saved. You can now use the `/connect` command to find connections.")
-                    except Exception as channel_error:
-                        print(f"Error sending channel message: {channel_error}")
+                await message.reply("Thanks for uploading your resume! Your information has been saved privately. You can now use the `/connect` command to find connections.")
                 
             except discord.errors.HTTPException as e:
                 print(f"HTTP Exception in on_message: {e}")
-                try:
-                    await message.reply(f"Error processing your resume: Discord API error. Please try again later.")
-                except Exception as reply_error:
-                    print(f"Error sending reply: {reply_error}")
+                await message.reply(f"Error processing your resume: Discord API error. Please try again later.")
             except Exception as e:
                 print(f"Error processing resume: {str(e)}")
-                try:
-                    await message.reply(f"Error processing your resume: {str(e)}\nPlease try again or contact an administrator for help.")
-                except Exception as reply_error:
-                    print(f"Error sending reply: {reply_error}")
+                await message.reply(f"Error processing your resume: {str(e)}\nPlease try again or contact an administrator for help.")
             finally:
                 # Clean up the temporary file
                 if temp_file_path and os.path.exists(temp_file_path):
@@ -257,21 +279,15 @@ async def on_message(message: discord.Message):
                         os.unlink(temp_file_path)
                     except Exception as e:
                         print(f"Error deleting temporary file: {str(e)}")
-        else:
-            # If the user is expected to upload a resume but sends a message instead
+        elif is_dm and not message.attachments:
+            # If the user is expected to upload a resume but sends a message instead in DM
             # Check if they're trying to cancel the resume upload
             if message.content.lower() in ["cancel", "stop", "quit", "exit"]:
                 # Remove the user from the waiting list
                 del waiting_for_resume[message.author.id]
-                try:
-                    await message.reply("Resume upload cancelled. You can use the `/register` command again if you change your mind.")
-                except Exception as e:
-                    print(f"Error sending reply: {e}")
+                await message.reply("Resume upload cancelled. You can use the `/register` command again if you change your mind.")
             else:
-                try:
-                    await message.reply("Please upload your resume as an attachment, or type 'cancel' to stop the resume upload process.")
-                except Exception as e:
-                    print(f"Error sending reply: {e}")
+                await message.reply("Please upload your resume as an attachment, or type 'cancel' to stop the resume upload process.")
         return
     
     # Check if the message has attachments (potential resume)
@@ -304,7 +320,7 @@ async def on_message(message: discord.Message):
                     # Debug output
                     print(f"Resume text extracted for feedback: {resume_text[:100]}...")
                     
-                    # Generate feedback using Mistral API
+                    # Generate feedback using OpenAI API
                     feedback = await get_resume_feedback(resume_text, message.author.name)
                     
                     # Ensure the feedback is within Discord's message length limits (2000 characters)
@@ -337,9 +353,9 @@ async def on_message(message: discord.Message):
             # We've handled the resume, so return
             return
     
-    # Process all normal messages (not commands) with Mistral API
+    # Process all normal messages (not commands) with OpenAI API
     if not message.content.startswith('/') and not message.content.startswith('!'):
-        print(f"Processing message with Mistral API: '{message.content}'")
+        print(f"Processing message with OpenAI API: '{message.content}'")
         
         # Show typing indicator to indicate the bot is processing
         async with message.channel.typing():
@@ -356,8 +372,8 @@ async def on_message(message: discord.Message):
                 
                 print(f"Processing chat message from {message.author.id}: {user_message}")
                 
-                # Call Mistral API for a response, passing the channel ID for history access
-                response_text = await get_mistral_response(
+                # Call OpenAI API for a response, passing the channel ID for history access
+                response_text = await get_openai_response(
                     user_message, 
                     message.author.name,
                     channel_id=str(message.channel.id)
@@ -383,9 +399,9 @@ async def on_message(message: discord.Message):
     await bot.process_commands(message)
 
 
-async def get_mistral_response(user_message: str, username: str, channel_id: str = None) -> str:
+async def get_openai_response(user_message: str, username: str, channel_id: str = None) -> str:
     """
-    Get a response from the Mistral API for a chat message.
+    Get a response from the OpenAI API for a chat message.
     
     Args:
         user_message: The user's message
@@ -393,7 +409,7 @@ async def get_mistral_response(user_message: str, username: str, channel_id: str
         channel_id: The channel ID for accessing message history
         
     Returns:
-        The response from Mistral
+        The response from OpenAI
     """
     try:
         # Check if the message is asking about conversation history
@@ -521,41 +537,26 @@ Remember that your primary purpose is to facilitate professional networking and 
                 system_prompt += "\n\nThe user is asking about conversation history, but you don't have access to the history. Politely explain that you can't recall the previous messages."
             print("No channel ID provided, cannot include conversation history")
 
-        # Prepare the request payload for Mistral API
-        payload = {
-            "model": "mistral-large-latest",  # Using Mistral's large model
-            "messages": [
+        # Initialize OpenAI client
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        
+        # Call OpenAI API directly
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            "max_tokens": 500,
-            "temperature": 0.7  # Higher temperature for more conversational responses
-        }
+            max_tokens=500,
+            temperature=0.7  # Higher temperature for more conversational responses
+        )
         
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {MISTRAL_API_KEY}"
-        }
+        # Extract the response
+        ai_response = response.choices[0].message.content.strip()
         
-        # Call Mistral API
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                MISTRAL_API_URL,
-                headers=headers,
-                json=payload,
-                timeout=30.0  # Increased timeout for API call
-            )
-            
-            # Check if the request was successful
-            response.raise_for_status()
-            
-            # Parse the response
-            response_data = response.json()
-            ai_response = response_data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-            
-            return ai_response
+        return ai_response
     except Exception as e:
-        print(f"Error calling Mistral API for chat: {e}")
+        print(f"Error calling OpenAI API for chat: {e}")
         return "I'm sorry, I'm having trouble processing your request right now. Please try again later or use one of our commands like /help, /register, or /connect."
 
 
@@ -566,22 +567,24 @@ Remember that your primary purpose is to facilitate professional networking and 
 async def connect(interaction: discord.Interaction, looking_for: str):
     """Command to find a connection."""
     try:
-        # Immediately acknowledge the interaction with a temporary response
-        await interaction.response.send_message(
-            f"🔍 Searching for someone who matches: '{looking_for}'...\n\n"
-            f"This may take a moment. I'll send you the results as soon as they're ready.",
-            ephemeral=True
-        )
-        print(f"Initial acknowledgment sent for connection request: '{looking_for}'")
+        # Immediately acknowledge the interaction with a deferred response
+        # This prevents the "application did not respond" error
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        print(f"Deferred response for connection request: '{looking_for}'")
         
-        # Create a background task to process the request
-        asyncio.create_task(process_connection_request(interaction, looking_for))
+        # Process the request directly (no need for background task with defer)
+        await process_connection_request(interaction, looking_for)
         
     except Exception as e:
         print(f"Error in connect command initial response: {e}")
         try:
             if not interaction.response.is_done():
                 await interaction.response.send_message(
+                    "Sorry, I encountered an error starting your search. Please try again later.",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
                     "Sorry, I encountered an error starting your search. Please try again later.",
                     ephemeral=True
                 )
@@ -593,7 +596,7 @@ async def connect(interaction: discord.Interaction, looking_for: str):
 async def process_connection_request(interaction: discord.Interaction, looking_for: str):
     """Process a connection request asynchronously."""
     try:
-        print(f"Processing connection request in background: '{looking_for}'")
+        print(f"Processing connection request: '{looking_for}'")
         
         # Get all users from the database
         candidates = await get_all_users()
@@ -601,19 +604,33 @@ async def process_connection_request(interaction: discord.Interaction, looking_f
         if not candidates:
             try:
                 await interaction.followup.send(
-                    f"Sorry, there are no users in our network yet.",
+                    f"Sorry, there are no users in our network yet. Please check back later when more people have registered.",
                     ephemeral=True
                 )
             except Exception as e:
                 print(f"Error sending no candidates message: {e}")
-                await send_dm_fallback(interaction.user, f"Sorry, there are no users in our network yet.")
+                await send_dm_fallback(interaction.user, f"Sorry, there are no users in our network yet. Please check back later when more people have registered.")
             return
         
-        # Find the best match using Mistral
+        # Filter candidates to only include those with resumes
+        candidates_with_resumes = [c for c in candidates if c.resume_text and len(c.resume_text.strip()) > 0]
+        
+        if not candidates_with_resumes:
+            try:
+                await interaction.followup.send(
+                    f"Sorry, none of the users in our network have uploaded resumes yet. Please check back later.",
+                    ephemeral=True
+                )
+            except Exception as e:
+                print(f"Error sending no resumes message: {e}")
+                await send_dm_fallback(interaction.user, f"Sorry, none of the users in our network have uploaded resumes yet. Please check back later.")
+            return
+        
+        # Find the best match using OpenAI
         try:
-            print(f"Calling Mistral API to find match for '{looking_for}'")
-            best_match, explanation = await find_best_match(looking_for, candidates)
-            print(f"Received response from Mistral API")
+            print(f"Calling OpenAI API to find match for '{looking_for}'")
+            best_match, explanation = await find_best_match(looking_for, candidates_with_resumes)
+            print(f"Received response from OpenAI API")
         except Exception as e:
             print(f"Error in find_best_match: {e}")
             try:
@@ -627,57 +644,11 @@ async def process_connection_request(interaction: discord.Interaction, looking_f
             return
         
         if best_match:
-            try:
-                # Clean up the explanation
-                clean_explanation = explanation if explanation else "This person's skills and experience match your requirements."
-                
-                # Replace "Candidate X" references with the person's name
-                for i, candidate in enumerate(candidates):
-                    candidate_ref = f"Candidate {i+1}"
-                    if candidate_ref in clean_explanation:
-                        clean_explanation = clean_explanation.replace(candidate_ref, candidate.name)
-                
-                # Remove any remaining "Candidate X" references (for candidates not in our list)
-                clean_explanation = re.sub(r'Candidate \d+', best_match.name, clean_explanation)
-                
-                # Remove any mentions of database, files, etc.
-                clean_explanation = re.sub(r'(?i)(database|file|stored|record|system)', 'network', clean_explanation)
-                
-                # Limit the explanation length to avoid Discord message limits
-                if len(clean_explanation) > 1500:
-                    clean_explanation = clean_explanation[:1500] + "..."
-                
-                message = (
-                    f"✅ I found a great match for you!\n\n"
-                    f"Name: {best_match.name}\n"
-                    f"Phone: {best_match.phone}\n\n"
-                    f"{clean_explanation}\n\n"
-                    f"Feel free to reach out to them directly!"
-                )
-                
-                # Record this connection request
-                await add_connection_request(best_match.id, str(interaction.user.id))
-                
-                print(f"Sending match response for {best_match.name}")
-                try:
-                    await interaction.followup.send(message, ephemeral=True)
-                except Exception as e:
-                    print(f"Error sending match response via followup: {e}")
-                    await send_dm_fallback(interaction.user, message)
-                    
-            except Exception as e:
-                print(f"Error preparing match response: {e}")
-                try:
-                    await interaction.followup.send(
-                        f"I found a match ({best_match.name}), but encountered an error displaying the details. Please try again.",
-                        ephemeral=True
-                    )
-                except Exception as follow_up_error:
-                    print(f"Error sending match error via followup: {follow_up_error}")
-                    await send_dm_fallback(interaction.user, f"I found a match ({best_match.name}), but encountered an error displaying the details. Please try again.")
+            await send_connection_response(interaction, best_match, explanation, candidates_with_resumes)
         else:
+            # Handle the case where no match was found
             try:
-                # Use the explanation from Mistral if available, otherwise use a default message
+                # Use the explanation from OpenAI if available, otherwise use a default message
                 no_match_reason = explanation if explanation else "Your specific requirements couldn't be matched with our current network."
                 
                 # Remove any mentions of database, files, etc.
@@ -696,8 +667,8 @@ async def process_connection_request(interaction: discord.Interaction, looking_f
                     no_match_reason = no_match_reason[:1500] + "..."
                 
                 message = (
-                    f"❌ Sorry, I couldn't find anyone matching your specific requirements for '{looking_for}'.\n\n"
-                    f"Reason: {no_match_reason}\n\n"
+                    f"❌ I couldn't find a match for '{looking_for}' in our current network.\n\n"
+                    f"{no_match_reason}\n\n"
                     f"Please try again with different criteria or check back later when more people have registered."
                 )
                 
@@ -707,7 +678,7 @@ async def process_connection_request(interaction: discord.Interaction, looking_f
                 except Exception as e:
                     print(f"Error sending no-match response via followup: {e}")
                     await send_dm_fallback(interaction.user, message)
-                    
+                
             except Exception as e:
                 print(f"Error preparing no-match response: {e}")
                 try:
@@ -728,6 +699,60 @@ async def process_connection_request(interaction: discord.Interaction, looking_f
         except Exception as follow_up_error:
             print(f"Error sending final error message: {follow_up_error}")
             await send_dm_fallback(interaction.user, "An unexpected error occurred while processing your request. Please try again later.")
+
+
+async def send_connection_response(interaction: discord.Interaction, best_match, explanation, candidates):
+    """Send a connection response to the user."""
+    try:
+        # Clean up the explanation
+        clean_explanation = explanation if explanation else "This person's skills and experience may be relevant to your requirements."
+        
+        # Replace "Candidate X" references with the person's name
+        for i, candidate in enumerate(candidates):
+            candidate_ref = f"Candidate {i+1}"
+            if candidate_ref in clean_explanation:
+                clean_explanation = clean_explanation.replace(candidate_ref, candidate.name)
+        
+        # Remove any remaining "Candidate X" references (for candidates not in our list)
+        clean_explanation = re.sub(r'Candidate \d+', best_match.name, clean_explanation)
+        
+        # Remove any mentions of database, files, etc.
+        clean_explanation = re.sub(r'(?i)(database|file|stored|record|system)', 'network', clean_explanation)
+        
+        # Limit the explanation length to avoid Discord message limits
+        if len(clean_explanation) > 1500:
+            clean_explanation = clean_explanation[:1500] + "..."
+        
+        message = (
+            f"✅ I found a connection for you!\n\n"
+            f"Name: {best_match.name}\n"
+            f"Phone: {best_match.phone}\n\n"
+            f"{clean_explanation}\n\n"
+            f"Feel free to reach out to them directly!"
+        )
+        
+        # Record this connection request
+        await add_connection_request(best_match.id, str(interaction.user.id))
+        
+        print(f"Sending match response for {best_match.name}")
+        try:
+            # Send the response as a followup to the deferred response
+            await interaction.followup.send(message, ephemeral=True)
+        except Exception as e:
+            print(f"Error sending match response via followup: {e}")
+            # Try to send a DM as a fallback
+            await send_dm_fallback(interaction.user, message)
+    except Exception as e:
+        print(f"Error in send_connection_response: {e}")
+        try:
+            # Send a simplified error message as a followup
+            await interaction.followup.send(
+                f"I found a match ({best_match.name}), but encountered an error displaying the details. Please try again.",
+                ephemeral=True
+            )
+        except Exception as follow_up_error:
+            print(f"Error sending match error via followup: {follow_up_error}")
+            await send_dm_fallback(interaction.user, f"I found a match ({best_match.name}), but encountered an error displaying the details. Please try again.")
 
 
 async def send_dm_fallback(user, message):
@@ -752,15 +777,13 @@ async def send_dm_fallback(user, message):
 async def update_info(interaction: discord.Interaction, name: Optional[str] = None, phone: Optional[str] = None, update_resume: Optional[bool] = False):
     """Command to update user information."""
     try:
-        # Immediately acknowledge the interaction with a temporary response
-        await interaction.response.send_message(
-            "Processing your update request...",
-            ephemeral=True
-        )
-        print(f"Initial acknowledgment sent for update request from user {interaction.user.id}")
+        # Immediately acknowledge the interaction with a deferred response
+        # This prevents the "application did not respond" error
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        print(f"Deferred response for update request from user {interaction.user.id}")
         
-        # Create a background task to process the request
-        asyncio.create_task(process_update_request(interaction, name, phone, update_resume))
+        # Process the request directly (no need for background task with defer)
+        await process_update_request(interaction, name, phone, update_resume)
         
     except Exception as e:
         print(f"Error in update command initial response: {e}")
@@ -770,14 +793,20 @@ async def update_info(interaction: discord.Interaction, name: Optional[str] = No
                     "Sorry, I encountered an error processing your update. Please try again later.",
                     ephemeral=True
                 )
+            else:
+                await interaction.followup.send(
+                    "Sorry, I encountered an error processing your update. Please try again later.",
+                    ephemeral=True
+                )
         except Exception as follow_up_error:
             print(f"Error sending initial error message: {follow_up_error}")
+            await send_dm_fallback(interaction.user, "Sorry, I encountered an error processing your update. Please try again later.")
 
 
 async def process_update_request(interaction: discord.Interaction, name: Optional[str], phone: Optional[str], update_resume: Optional[bool]):
     """Process an update request asynchronously."""
     try:
-        print(f"Processing update request in background for user {interaction.user.id}")
+        print(f"Processing update request for user {interaction.user.id}")
         
         # Get the user's Discord ID
         discord_id = str(interaction.user.id)
@@ -817,24 +846,28 @@ async def process_update_request(interaction: discord.Interaction, name: Optiona
                 waiting_for_resume[interaction.user.id] = user.id
                 try:
                     await interaction.followup.send(
-                        "Please upload your new resume as an attachment in your next message. This will replace your existing resume.",
+                        "Please check your DMs to upload your new resume privately. This will replace your existing resume.",
                         ephemeral=True
                     )
+                    # Send a DM to the user requesting the resume
+                    await request_resume_via_dm(interaction.user, "Please upload your new resume as an attachment in this private message. This will replace your existing resume.")
                 except Exception as e:
                     print(f"Error sending resume update message: {e}")
-                    await send_dm_fallback(interaction.user, "Please upload your new resume as an attachment in your next message. This will replace your existing resume.")
+                    await send_dm_fallback(interaction.user, "Please upload your new resume as an attachment in this private message. This will replace your existing resume.")
                 return
             else:
                 # Store the user ID in the waiting_for_resume dictionary
                 waiting_for_resume[interaction.user.id] = user.id
                 try:
                     await interaction.followup.send(
-                        "Please upload your resume as an attachment in your next message.",
+                        "Please check your DMs to upload your resume privately.",
                         ephemeral=True
                     )
+                    # Send a DM to the user requesting the resume
+                    await request_resume_via_dm(interaction.user, "Please upload your resume as an attachment in this private message.")
                 except Exception as e:
                     print(f"Error sending resume request message: {e}")
-                    await send_dm_fallback(interaction.user, "Please upload your resume as an attachment in your next message.")
+                    await send_dm_fallback(interaction.user, "Please upload your resume as an attachment in this private message.")
                 return
         
         if not updated and not update_resume:
@@ -885,15 +918,13 @@ async def process_update_request(interaction: discord.Interaction, name: Optiona
 async def help_command(interaction: discord.Interaction):
     """Command to provide help information."""
     try:
-        # Immediately acknowledge the interaction with a temporary response
-        await interaction.response.send_message(
-            "Fetching help information...",
-            ephemeral=True
-        )
-        print(f"Initial acknowledgment sent for help request from user {interaction.user.id}")
+        # Immediately acknowledge the interaction with a deferred response
+        # This prevents the "application did not respond" error
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        print(f"Deferred response for help request from user {interaction.user.id}")
         
-        # Create a background task to process the request
-        asyncio.create_task(process_help_request(interaction))
+        # Process the request directly (no need for background task with defer)
+        await process_help_request(interaction)
         
     except Exception as e:
         print(f"Error in help command initial response: {e}")
@@ -903,14 +934,20 @@ async def help_command(interaction: discord.Interaction):
                     "Sorry, I encountered an error fetching help information. Please try again later.",
                     ephemeral=True
                 )
+            else:
+                await interaction.followup.send(
+                    "Sorry, I encountered an error fetching help information. Please try again later.",
+                    ephemeral=True
+                )
         except Exception as follow_up_error:
             print(f"Error sending initial error message: {follow_up_error}")
+            await send_dm_fallback(interaction.user, "Sorry, I encountered an error fetching help information. Please try again later.")
 
 
 async def process_help_request(interaction: discord.Interaction):
     """Process a help request asynchronously."""
     try:
-        print(f"Processing help request in background for user {interaction.user.id}")
+        print(f"Processing help request for user {interaction.user.id}")
         
         help_message = (
             "# 🤖 Super Connector Bot Help\n\n"
@@ -963,7 +1000,7 @@ async def process_help_request(interaction: discord.Interaction):
 
 async def get_resume_feedback(resume_text: str, username: str) -> str:
     """
-    Generate feedback for a resume using the Mistral API.
+    Generate feedback for a resume using the OpenAI API.
     
     Args:
         resume_text: The extracted text from the resume
@@ -999,55 +1036,27 @@ Be direct and to the point. Avoid lengthy explanations. Focus on the most impact
         print(f"User prompt length: {len(user_prompt)} characters")
         print(f"Total message content length: {len(system_prompt) + len(user_prompt)} characters")
         
-        # Prepare the request payload for Mistral API - ensure correct structure
-        payload = {
-            "model": "mistral-large-latest",
-            "messages": [
+        # Initialize OpenAI client
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        
+        # Call OpenAI API directly
+        print("Sending request to OpenAI API...")
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            "temperature": 0.5,
-            "max_tokens": 400  # Reduced token limit to encourage brevity
-        }
+            temperature=0.5,
+            max_tokens=400  # Reduced token limit to encourage brevity
+        )
         
-        # Convert to JSON string and back to ensure proper formatting
-        payload_json = json.dumps(payload)
-        payload = json.loads(payload_json)
+        # Extract the response
+        ai_response = response.choices[0].message.content.strip()
         
-        print(f"API request payload: {payload_json[:200]}...")
-        
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {MISTRAL_API_KEY}"
-        }
-        
-        # Call Mistral API with explicit timeout and proper error handling
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            print("Sending request to Mistral API...")
-            response = await client.post(
-                MISTRAL_API_URL,
-                headers=headers,
-                json=payload
-            )
-            
-            # Print response status and headers for debugging
-            print(f"API response status: {response.status_code}")
-            print(f"API response headers: {dict(response.headers)}")
-            
-            # Check if the request was successful
-            if response.status_code != 200:
-                print(f"API error response: {response.text}")
-                raise Exception(f"API request failed with status {response.status_code}: {response.text}")
-            
-            # Parse the response
-            response_data = response.json()
-            print(f"API response data keys: {response_data.keys()}")
-            
-            ai_response = response_data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-            
-            if not ai_response:
-                print(f"Empty response from API: {response_data}")
-                raise Exception("Empty response from API")
+        if not ai_response:
+            print("Empty response from API")
+            raise Exception("Empty response from API")
         
         # Format the response - ensure it's within Discord's message length limits
         formatted_response = f"# 📄 Resume Review\n\n{ai_response[:1500]}"
@@ -1072,8 +1081,10 @@ Be direct and to the point. Avoid lengthy explanations. Focus on the most impact
 async def view_profile(interaction: discord.Interaction):
     """Command to view user's profile information."""
     try:
-        # Acknowledge the interaction immediately to prevent timeout
+        # Immediately acknowledge the interaction with a deferred response
+        # This prevents the "application did not respond" error
         await interaction.response.defer(ephemeral=True, thinking=True)
+        print(f"Deferred response for profile request from user {interaction.user.id}")
         
         # Get the user's Discord ID
         discord_id = str(interaction.user.id)

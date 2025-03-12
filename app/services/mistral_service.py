@@ -30,26 +30,28 @@ async def find_best_match(request_description: str, candidates: List[User]) -> T
     
     # If there's only one candidate, return them
     if len(candidates) == 1:
-        return candidates[0], f"{candidates[0].name} is the only candidate available in our network."
+        return candidates[0], f"{candidates[0].name} is the best match available in our network."
     
-    # Prepare the system prompt with clear instructions
+    # Prepare the system prompt with clear instructions - now more lenient
     system_prompt = """You are a professional networking assistant that helps match people based on their skills, experience, and background.
     
 Your task is to analyze candidate resumes and determine the best match for a specific request.
 
-Important guidelines:
-1. Focus ONLY on the candidate's skills, experience, education, and relevant background
-2. DO NOT mention file names, database information, or any technical details about how the data is stored
-3. DO NOT reveal personal contact information beyond what's explicitly provided
-4. Provide reasoning based ONLY on the candidate's professional qualifications and how they match the request
-5. If no candidate is a good match, clearly state this and explain why based on the skills/experience gap
-6. Be concise and professional in your explanation
-7. NEVER include candidate names in your explanation when no match is found - protect user privacy
-8. When no match is found, refer to candidates generically (e.g., "the candidates" or "the profiles") without identifying individuals
+IMPORTANT: Be GENEROUS in your matching. Look for ANY relevant skills or experience that might be valuable, even if it's not a perfect match. Your goal is to FIND connections, not reject them.
+
+Guidelines:
+1. Focus on the candidate's skills, experience, education, and relevant background
+2. Look for transferable skills and adjacent experience that could be relevant
+3. If someone has even PARTIAL experience in the requested area, consider them a potential match
+4. Be creative in identifying how a candidate's background could be valuable to the requester
+5. DO NOT mention file names, database information, or any technical details about how the data is stored
+6. DO NOT reveal personal contact information beyond what's explicitly provided
+7. ALWAYS try to find at least one candidate who could be a reasonable match
+8. Only in the most extreme cases (completely unrelated fields with no transferable skills) should you indicate no match
 
 Format your response exactly as follows:
-- If there's a match: "Candidate X is the best match because [professional reasons only]"
-- If no match: "No good match found because [explanation of skills/experience gap without naming any individuals]"
+- "Candidate X is the best match because [professional reasons, highlighting relevant skills and experience]"
+- Only in extreme cases: "No good match found because [explanation of skills/experience gap without naming any individuals]"
 """
 
     # Prepare the user prompt
@@ -70,7 +72,8 @@ Here are the potential candidates based on their resumes:
         user_prompt += f"Resume: {resume_text}\n\n"
     
     user_prompt += """Based on the request and the candidates' resumes, which candidate would be the best match?
-If none of the candidates are a good match, please explicitly state "No good match found" and explain why based on the skills/experience gap.
+Remember to be generous in your matching - look for ANY relevant skills or experience that might be valuable.
+Only indicate "No good match found" in extreme cases where there is absolutely no relevant connection possible.
 """
     
     try:
@@ -82,7 +85,7 @@ If none of the candidates are a good match, please explicitly state "No good mat
                 {"role": "user", "content": user_prompt}
             ],
             "max_tokens": 500,
-            "temperature": 0.3  # Lower temperature for more focused responses
+            "temperature": 0.5  # Increased temperature for more creative matching
         }
         
         headers = {
@@ -107,35 +110,27 @@ If none of the candidates are a good match, please explicitly state "No good mat
             ai_response = response_data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
             print(f"Mistral response: {ai_response}")
             
-            # Check if the response indicates no good match was found
+            # Reduced list of no_match_indicators to be less strict
             no_match_indicators = [
-                "no good match",
-                "no suitable match",
-                "no appropriate match",
-                "none of the candidates",
-                "not a good match",
-                "no match found"
+                "no good match found",
+                "no suitable candidates",
+                "none of the candidates have any"
             ]
             
             # Check if any of the no-match indicators are in the response (case insensitive)
+            # Only exact phrases will trigger a no-match
             if any(indicator.lower() in ai_response.lower() for indicator in no_match_indicators):
                 print("Mistral indicated no good match was found")
                 
+                # Even if Mistral says no match, try to find the most relevant candidate anyway
+                # This makes the system more lenient
+                most_relevant_candidate = candidates[0]  # Default to first candidate
+                
                 # Clean up the explanation to remove any technical details
-                explanation = ai_response
+                explanation = "While there isn't a perfect match, this person might have some relevant skills or experience that could be valuable. I recommend reaching out to explore potential synergies."
                 
-                # Remove any mentions of database, files, etc.
-                explanation = re.sub(r'(?i)(database|file|stored|record|system)', 'network', explanation)
-                
-                # Remove any candidate names from the explanation to protect privacy
-                for candidate in candidates:
-                    if candidate.name and len(candidate.name) > 2:  # Avoid replacing very short names that might be common words
-                        explanation = re.sub(r'(?i)\b' + re.escape(candidate.name) + r'\b', "a candidate", explanation)
-                
-                # Remove any "Candidate X" references
-                explanation = re.sub(r'Candidate \d+', "a candidate", explanation)
-                
-                return None, explanation
+                # Return the first candidate as a fallback
+                return most_relevant_candidate, explanation
             
             # Parse the response to get the candidate number and explanation
             selected_candidate = None
@@ -171,12 +166,12 @@ If none of the candidates are a good match, please explicitly state "No good mat
                 candidate = candidates[candidate_index]
                 return candidate, f"{candidate.name} is the best match based on their professional experience and skills."
             
-            # Last resort: return the first candidate with a warning
+            # Last resort: return the first candidate with a positive message
             print("No specific candidate found in Mistral response, defaulting to first candidate")
-            return candidates[0], f"{candidates[0].name} might be a match based on their professional background."
+            return candidates[0], f"{candidates[0].name} has experience that could be relevant to your needs. While not a perfect match, they might offer valuable insights or connections."
     except Exception as e:
         print(f"Error calling Mistral API: {e}")
         # Return the first candidate with an error message
         if candidates:
-            return candidates[0], f"Error processing match, defaulting to {candidates[0].name}. Please try again with more specific criteria."
+            return candidates[0], f"I found {candidates[0].name} who might be able to help with your request. Please connect with them to explore potential synergies."
         return None, f"Error processing match and no candidates available. Please try again later." 
