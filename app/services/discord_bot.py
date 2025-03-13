@@ -5,12 +5,13 @@ from discord.ext import commands
 import asyncio
 from dotenv import load_dotenv
 import tempfile
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Callable, Any
 import re
 import json
 import time
 from collections import defaultdict, deque
 from openai import OpenAI
+import functools
 
 from app.models.user import User
 from app.services.database import create_user, get_user, update_user_resume, get_users_by_category, get_all_users, update_user, delete_user, add_connection_request
@@ -65,16 +66,13 @@ async def on_ready():
 async def register(interaction: discord.Interaction, name: str, phone: str):
     """Command to register a user."""
     try:
-        # Immediately acknowledge the interaction with a deferred response
-        # This prevents the "application did not respond" error
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        print(f"Deferred response for registration request from {name}")
+        print(f"Received registration request from {name}")
         
-        # Process the request directly (no need for background task with defer)
-        await process_registration_request(interaction, name, phone)
+        # Use the timeout safety mechanism
+        await with_timeout_safety(interaction, process_registration_request, interaction, name, phone)
         
     except Exception as e:
-        print(f"Error in register command initial response: {e}")
+        print(f"Error in register command: {e}")
         try:
             if not interaction.response.is_done():
                 await interaction.response.send_message(
@@ -87,7 +85,7 @@ async def register(interaction: discord.Interaction, name: str, phone: str):
                     ephemeral=True
                 )
         except Exception as follow_up_error:
-            print(f"Error sending initial error message: {follow_up_error}")
+            print(f"Error sending error message: {follow_up_error}")
             await send_dm_fallback(interaction.user, "Sorry, I encountered an error processing your registration. Please try again later.")
 
 
@@ -567,16 +565,13 @@ Remember that your primary purpose is to facilitate professional networking and 
 async def connect(interaction: discord.Interaction, looking_for: str):
     """Command to find a connection."""
     try:
-        # Immediately acknowledge the interaction with a deferred response
-        # This prevents the "application did not respond" error
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        print(f"Deferred response for connection request: '{looking_for}'")
+        print(f"Received connection request: '{looking_for}'")
         
-        # Process the request directly (no need for background task with defer)
-        await process_connection_request(interaction, looking_for)
+        # Use the timeout safety mechanism with a custom timeout
+        await with_timeout_safety(interaction, process_connection_request, interaction, looking_for, timeout=2.5)
         
     except Exception as e:
-        print(f"Error in connect command initial response: {e}")
+        print(f"Error in connect command: {e}")
         try:
             if not interaction.response.is_done():
                 await interaction.response.send_message(
@@ -589,7 +584,7 @@ async def connect(interaction: discord.Interaction, looking_for: str):
                     ephemeral=True
                 )
         except Exception as follow_up_error:
-            print(f"Error sending initial error message: {follow_up_error}")
+            print(f"Error sending error message: {follow_up_error}")
             await send_dm_fallback(interaction.user, f"Sorry, I encountered an error starting your search. Please try again later.")
 
 
@@ -775,18 +770,15 @@ async def send_dm_fallback(user, message):
     update_resume="Whether to update your resume (optional)"
 )
 async def update_info(interaction: discord.Interaction, name: Optional[str] = None, phone: Optional[str] = None, update_resume: Optional[bool] = False):
-    """Command to update user information."""
+    """Command to update a user's information."""
     try:
-        # Immediately acknowledge the interaction with a deferred response
-        # This prevents the "application did not respond" error
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        print(f"Deferred response for update request from user {interaction.user.id}")
+        print(f"Received update request from {interaction.user.name}")
         
-        # Process the request directly (no need for background task with defer)
-        await process_update_request(interaction, name, phone, update_resume)
+        # Use the timeout safety mechanism
+        await with_timeout_safety(interaction, process_update_request, interaction, name, phone, update_resume)
         
     except Exception as e:
-        print(f"Error in update command initial response: {e}")
+        print(f"Error in update command: {e}")
         try:
             if not interaction.response.is_done():
                 await interaction.response.send_message(
@@ -799,7 +791,7 @@ async def update_info(interaction: discord.Interaction, name: Optional[str] = No
                     ephemeral=True
                 )
         except Exception as follow_up_error:
-            print(f"Error sending initial error message: {follow_up_error}")
+            print(f"Error sending error message: {follow_up_error}")
             await send_dm_fallback(interaction.user, "Sorry, I encountered an error processing your update. Please try again later.")
 
 
@@ -916,32 +908,29 @@ async def process_update_request(interaction: discord.Interaction, name: Optiona
 
 @bot.tree.command(name="help", description="Get help with using the Super Connector bot")
 async def help_command(interaction: discord.Interaction):
-    """Command to provide help information."""
+    """Command to get help with using the bot."""
     try:
-        # Immediately acknowledge the interaction with a deferred response
-        # This prevents the "application did not respond" error
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        print(f"Deferred response for help request from user {interaction.user.id}")
+        print(f"Received help request from {interaction.user.name}")
         
-        # Process the request directly (no need for background task with defer)
-        await process_help_request(interaction)
+        # Use the timeout safety mechanism
+        await with_timeout_safety(interaction, process_help_request, interaction)
         
     except Exception as e:
-        print(f"Error in help command initial response: {e}")
+        print(f"Error in help command: {e}")
         try:
             if not interaction.response.is_done():
                 await interaction.response.send_message(
-                    "Sorry, I encountered an error fetching help information. Please try again later.",
+                    "Sorry, I encountered an error processing your help request. Please try again later.",
                     ephemeral=True
                 )
             else:
                 await interaction.followup.send(
-                    "Sorry, I encountered an error fetching help information. Please try again later.",
+                    "Sorry, I encountered an error processing your help request. Please try again later.",
                     ephemeral=True
                 )
         except Exception as follow_up_error:
-            print(f"Error sending initial error message: {follow_up_error}")
-            await send_dm_fallback(interaction.user, "Sorry, I encountered an error fetching help information. Please try again later.")
+            print(f"Error sending error message: {follow_up_error}")
+            await send_dm_fallback(interaction.user, "Sorry, I encountered an error processing your help request. Please try again later.")
 
 
 async def process_help_request(interaction: discord.Interaction):
@@ -1079,47 +1068,13 @@ Be direct and to the point. Avoid lengthy explanations. Focus on the most impact
 
 @bot.tree.command(name="profile", description="View your current profile information")
 async def view_profile(interaction: discord.Interaction):
-    """Command to view user's profile information."""
+    """Command to view a user's profile."""
     try:
-        # Immediately acknowledge the interaction with a deferred response
-        # This prevents the "application did not respond" error
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        print(f"Deferred response for profile request from user {interaction.user.id}")
+        print(f"Received profile request from {interaction.user.name}")
         
-        # Get the user's Discord ID
-        discord_id = str(interaction.user.id)
-        print(f"Looking up profile for Discord ID: {discord_id}")
+        # Use the timeout safety mechanism
+        await with_timeout_safety(interaction, process_profile_request, interaction)
         
-        # Try to find the user in the database
-        user = await get_user(discord_id)
-        
-        if not user:
-            await interaction.followup.send(
-                "You haven't registered yet. Please use the `/register` command first.",
-                ephemeral=True
-            )
-            return
-        
-        # Create a profile message
-        profile_message = f"**Your Profile Information**\n\n"
-        profile_message += f"Name: {user.name}\n"
-        profile_message += f"Phone: {user.phone}\n"
-        
-        # Add resume information if available
-        if user.has_resume:
-            profile_message += f"Resume: ✅ Uploaded\n"
-        else:
-            profile_message += "Resume: ❌ Not uploaded\n"
-        
-        # Add connection request information
-        if user.connection_requests and len(user.connection_requests) > 0:
-            profile_message += f"\nYour profile has been shared with {len(user.connection_requests)} people who requested connections.\n"
-        else:
-            profile_message += "\nYour profile hasn't been shared with anyone yet.\n"
-        
-        profile_message += "\n\nTo update your information, use the `/update` command."
-        
-        await interaction.followup.send(profile_message, ephemeral=True)
     except Exception as e:
         print(f"Error in profile command: {e}")
         try:
@@ -1140,6 +1095,142 @@ async def view_profile(interaction: discord.Interaction):
                     await send_dm_fallback(interaction.user, "Error retrieving your profile. Please try again later.")
         except Exception as response_error:
             print(f"Error sending error message: {response_error}")
+
+
+async def process_profile_request(interaction: discord.Interaction):
+    """Process a profile request."""
+    # Get the user's Discord ID
+    discord_id = str(interaction.user.id)
+    
+    # Get the user from the database
+    user = await get_user(discord_id)
+    
+    if not user:
+        await interaction.followup.send(
+            "You're not registered yet. Please use the `/register` command to create your profile.",
+            ephemeral=True
+        )
+        return
+    
+    # Create a profile message
+    profile_message = f"**Your Profile Information**\n\n"
+    profile_message += f"Name: {user.name}\n"
+    profile_message += f"Phone: {user.phone}\n"
+    
+    # Add resume information if available
+    if user.has_resume:
+        profile_message += f"Resume: ✅ Uploaded\n"
+    else:
+        profile_message += "Resume: ❌ Not uploaded\n"
+    
+    # Add connection request information
+    if user.connection_requests and len(user.connection_requests) > 0:
+        profile_message += f"\nYour profile has been shared with {len(user.connection_requests)} people who requested connections.\n"
+    else:
+        profile_message += "\nYour profile hasn't been shared with anyone yet.\n"
+    
+    profile_message += "\n\nTo update your information, use the `/update` command."
+    
+    await interaction.followup.send(profile_message, ephemeral=True)
+
+
+async def execute_with_timeout(func: Callable, *args, timeout: float = 2.5, **kwargs) -> Any:
+    """
+    Execute a function with a timeout.
+    
+    Args:
+        func: The function to execute
+        *args: Arguments to pass to the function
+        timeout: Timeout in seconds (default: 2.5 seconds)
+        **kwargs: Keyword arguments to pass to the function
+        
+    Returns:
+        The result of the function
+        
+    Raises:
+        asyncio.TimeoutError: If the function takes longer than the timeout
+    """
+    # Create a task for the function
+    task = asyncio.create_task(func(*args, **kwargs))
+    
+    # Wait for the task to complete with a timeout
+    return await asyncio.wait_for(task, timeout=timeout)
+
+
+async def with_timeout_safety(interaction: discord.Interaction, func: Callable, *args, **kwargs) -> Any:
+    """
+    Execute a function with timeout safety to ensure Discord interactions are responded to within the 3-second limit.
+    
+    Args:
+        interaction: The Discord interaction
+        func: The function to execute
+        *args: Arguments to pass to the function
+        **kwargs: Keyword arguments to pass to the function. Can include a 'timeout' parameter (default: 2.5 seconds)
+        
+    Returns:
+        The result of the function
+    """
+    # Extract timeout from kwargs if provided, otherwise use default
+    timeout = kwargs.pop('timeout', 2.5)
+    
+    try:
+        # First, ensure we've acknowledged the interaction to prevent timeout
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            print(f"Deferred response for interaction from {interaction.user.name}")
+        
+        # Execute the function with a timeout
+        result = await execute_with_timeout(func, *args, timeout=timeout, **kwargs)
+        return result
+    except asyncio.TimeoutError:
+        print(f"Function timed out: {func.__name__}")
+        # If we've already deferred, send a followup
+        if interaction.response.is_done():
+            try:
+                await interaction.followup.send(
+                    "This operation is taking longer than expected. I'll send you a direct message when it's complete.",
+                    ephemeral=True
+                )
+            except Exception as e:
+                print(f"Error sending timeout message: {e}")
+        
+        # Continue processing in the background and notify via DM when done
+        asyncio.create_task(send_result_via_dm(interaction.user, func, *args, **kwargs))
+        return None
+    except Exception as e:
+        print(f"Error in with_timeout_safety: {e}")
+        # If we've already deferred, send a followup
+        if interaction.response.is_done():
+            try:
+                await interaction.followup.send(
+                    f"Sorry, I encountered an error: {str(e)}. Please try again later.",
+                    ephemeral=True
+                )
+            except Exception as follow_up_error:
+                print(f"Error sending error message: {follow_up_error}")
+                await send_dm_fallback(interaction.user, f"Sorry, I encountered an error: {str(e)}. Please try again later.")
+        return None
+
+
+async def send_result_via_dm(user, func, *args, **kwargs):
+    """
+    Execute a function and send the result via DM.
+    Used as a fallback when a command takes too long to process.
+    
+    Args:
+        user: The Discord user to send the result to
+        func: The function to execute
+        *args, **kwargs: Arguments to pass to the function
+    """
+    try:
+        # Execute the function
+        await func(*args, **kwargs)
+        
+        # Send a DM to the user
+        await send_dm_fallback(user, "Your request has been processed. Please check the original channel for the result or use the command again.")
+    except Exception as e:
+        print(f"Error in send_result_via_dm: {e}")
+        await send_dm_fallback(user, f"Sorry, I encountered an error processing your request: {str(e)}. Please try again later.")
 
 
 async def start_bot():
